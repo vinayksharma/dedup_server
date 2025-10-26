@@ -338,20 +338,14 @@ namespace MediaDedup
                         // Mark file as in use
                         disk_cache->markFileInUse(processing_file_path);
 
-                        Poco::Logger::get("MediaProcessor").trace("About to process file - processing_path: %s, original_path: %s", processing_file_path, file_path_copy);
-                        
                         try
                         {
                             ImageProcessor image_processor;
                             bool processing_success = false;
 
-                            Poco::Logger::get("MediaProcessor").trace("Calling image_processor.Process with processing_path: %s", processing_file_path);
-                            
                             // Process image using cached file
                             // Pass both processing file path and original source file path
                             processing_success = image_processor.Process(processing_file_path, file_path_copy, *db_manager, config_manager);
-                            
-                            Poco::Logger::get("MediaProcessor").trace("image_processor.Process returned: %s", processing_success ? "true" : "false");
 
                             // Update database status within the lambda using connection pool
                             if (processing_success)
@@ -381,14 +375,22 @@ namespace MediaDedup
                         }
                         catch (...)
                         {
-                            // Don't delete file here - leave it for debugging if ONNX failed
+                            // Clean up cache file before re-throwing
+                            disk_cache->markFileNotInUse(processing_file_path);
+                            disk_cache->deleteFromCacheImmediately(processing_file_path);
                             throw;
                         }
 
-                        // Cleanup: Mark file as not in use and delete it after processing
-                        // This happens here, not in RAII, because we need processing to complete first
-                        disk_cache->markFileNotInUse(processing_file_path);
-                        disk_cache->deleteFromCacheImmediately(processing_file_path);
+                        // Use RAII pattern for cleanup - runs after all processing is complete
+                        struct CacheCleanup {
+                            std::shared_ptr<DiskCache> cache;
+                            std::string path;
+                            CacheCleanup(std::shared_ptr<DiskCache> c, const std::string& p) : cache(c), path(p) {}
+                            ~CacheCleanup() {
+                                cache->markFileNotInUse(path);
+                                cache->deleteFromCacheImmediately(path);
+                            }
+                        } cleanup(disk_cache, processing_file_path);
                     }
                     catch (const std::bad_alloc& e)
                     {
@@ -466,9 +468,10 @@ namespace MediaDedup
 
                 // Capture by value for thread safety and to avoid dangling references
                 std::string file_path_copy = file_path;
+                ServerMode server_mode_copy = server_mode;
                 std::shared_ptr<DatabaseManager> db_manager = database_manager_;
 
-                thread_pool_manager_->submit("media_processor", [file_path_copy, db_manager]()
+                thread_pool_manager_->submit("media_processor", [file_path_copy, server_mode_copy, db_manager]()
                                              {
                     try
                     {
@@ -478,7 +481,19 @@ namespace MediaDedup
                         auto current_file = ScannedFilesOps::getByPath(*db_manager, file_path_copy);
                         if (current_file.has_value())
                         {
-                            int current_status = current_file->processed;
+                            int current_status = 0;
+                            switch (server_mode_copy)
+                            {
+                            case ServerMode::EMBEDDING:
+                                current_status = current_file->processed;
+                                break;
+                            case ServerMode::BALANCED:
+                                current_status = current_file->processed;
+                                break;
+                            case ServerMode::QUALITY:
+                                current_status = current_file->processed;
+                                break;
+                            }
 
                             // Skip if already processed (status >= 2) or currently in progress (status = 1)
                             if (current_status >= 2)
@@ -497,7 +512,19 @@ namespace MediaDedup
                         // If file is in an error state, keep it so escalation logic can work properly
                         if (current_file.has_value())
                         {
-                            int current_status_check = current_file->processed;
+                            int current_status_check = 0;
+                            switch (server_mode_copy)
+                            {
+                            case ServerMode::EMBEDDING:
+                                current_status_check = current_file->processed;
+                                break;
+                            case ServerMode::BALANCED:
+                                current_status_check = current_file->processed;
+                                break;
+                            case ServerMode::QUALITY:
+                                current_status_check = current_file->processed;
+                                break;
+                            }
                             
                             // Only mark as "in progress" if not already in an error state
                             if (current_status_check >= 0)
@@ -524,8 +551,22 @@ namespace MediaDedup
                         VideoProcessor video_processor;
                         bool processing_success = false;
 
-                        // Process video (media loading happens here on-demand)
-                        processing_success = video_processor.Process(file_path_copy);
+                        // Process based on server mode (media loading happens here on-demand)
+                        switch (server_mode_copy)
+                        {
+                        case ServerMode::EMBEDDING:
+                            processing_success = video_processor.ProcessFast(file_path_copy);
+                            break;
+                        case ServerMode::BALANCED:
+                            processing_success = video_processor.ProcessBalanced(file_path_copy);
+                            break;
+                        case ServerMode::QUALITY:
+                            processing_success = video_processor.ProcessQuality(file_path_copy);
+                            break;
+                        default:
+                            processing_success = video_processor.ProcessFast(file_path_copy);
+                            break;
+                        }
 
                         // Update database status within the lambda using connection pool
                         if (processing_success)
@@ -616,9 +657,10 @@ namespace MediaDedup
 
                 // Capture by value for thread safety and to avoid dangling references
                 std::string file_path_copy = file_path;
+                ServerMode server_mode_copy = server_mode;
                 std::shared_ptr<DatabaseManager> db_manager = database_manager_;
 
-                thread_pool_manager_->submit("media_processor", [file_path_copy, db_manager]()
+                thread_pool_manager_->submit("media_processor", [file_path_copy, server_mode_copy, db_manager]()
                                              {
                     try
                     {
@@ -628,7 +670,19 @@ namespace MediaDedup
                         auto current_file = ScannedFilesOps::getByPath(*db_manager, file_path_copy);
                         if (current_file.has_value())
                         {
-                            int current_status = current_file->processed;
+                            int current_status = 0;
+                            switch (server_mode_copy)
+                            {
+                            case ServerMode::EMBEDDING:
+                                current_status = current_file->processed;
+                                break;
+                            case ServerMode::BALANCED:
+                                current_status = current_file->processed;
+                                break;
+                            case ServerMode::QUALITY:
+                                current_status = current_file->processed;
+                                break;
+                            }
 
                             // Skip if already processed (status >= 2) or currently in progress (status = 1)
                             if (current_status >= 2)
@@ -647,7 +701,19 @@ namespace MediaDedup
                         // If file is in an error state, keep it so escalation logic can work properly
                         if (current_file.has_value())
                         {
-                            int current_status_check = current_file->processed;
+                            int current_status_check = 0;
+                            switch (server_mode_copy)
+                            {
+                            case ServerMode::EMBEDDING:
+                                current_status_check = current_file->processed;
+                                break;
+                            case ServerMode::BALANCED:
+                                current_status_check = current_file->processed;
+                                break;
+                            case ServerMode::QUALITY:
+                                current_status_check = current_file->processed;
+                                break;
+                            }
                             
                             // Only mark as "in progress" if not already in an error state
                             if (current_status_check >= 0)
@@ -674,8 +740,22 @@ namespace MediaDedup
                         AudioProcessor audio_processor;
                         bool processing_success = false;
 
-                        // Process audio (media loading happens here on-demand)
-                        processing_success = audio_processor.Process(file_path_copy);
+                        // Process based on server mode (media loading happens here on-demand)
+                        switch (server_mode_copy)
+                        {
+                        case ServerMode::EMBEDDING:
+                            processing_success = audio_processor.ProcessFast(file_path_copy);
+                            break;
+                        case ServerMode::BALANCED:
+                            processing_success = audio_processor.ProcessBalanced(file_path_copy);
+                            break;
+                        case ServerMode::QUALITY:
+                            processing_success = audio_processor.ProcessQuality(file_path_copy);
+                            break;
+                        default:
+                            processing_success = audio_processor.ProcessFast(file_path_copy);
+                            break;
+                        }
 
                         // Update database status within the lambda using connection pool
                         if (processing_success)
@@ -778,7 +858,26 @@ namespace MediaDedup
             return;
         }
 
-        Poco::Logger::get("MediaProcessor").information("Processing media files");
+        // Get current server mode
+        ServerMode current_mode = getCurrentServerMode();
+        std::string mode_str;
+        if (current_mode == ServerMode::EMBEDDING)
+        {
+            mode_str = "FAST";
+        }
+        else if (current_mode == ServerMode::BALANCED)
+        {
+            mode_str = "BALANCED";
+        }
+        else if (current_mode == ServerMode::QUALITY)
+        {
+            mode_str = "QUALITY";
+        }
+        else
+        {
+            mode_str = "UNKNOWN";
+        }
+        Poco::Logger::get("MediaProcessor").information("Processing media files in mode: " + mode_str);
 
         try
         {
@@ -797,7 +896,7 @@ namespace MediaDedup
             Poco::Logger::get("MediaProcessor").debug("Media processor queue has %zu available slots (current: %zu, max: %zu)", available_space, current_queue_depth, max_processing_queue_size_);
 
             // Query unprocessed files limited to available queue space to prevent memory buildup and backpressure thrashing
-            std::vector<ScannedFileRow> unprocessed_files = ScannedFilesOps::listUnprocessed(*database_manager_, static_cast<int>(available_space));
+            std::vector<ScannedFileRow> unprocessed_files = ScannedFilesOps::listUnprocessed(*database_manager_, current_mode, static_cast<int>(available_space));
 
             Poco::Logger::get("MediaProcessor").information("Found " + std::to_string(unprocessed_files.size()) + " unprocessed files for current server mode (limited to " + std::to_string(available_space) + " by available queue space)");
 
@@ -835,12 +934,24 @@ namespace MediaDedup
                             auto existing = ScannedFilesOps::getByPath(*database_manager_, file_row.file_path);
                             if (existing)
                             {
-                                // Check the current status
-                                int current_status = existing->processed;
+                                // Check the appropriate field based on current mode
+                                int current_status = 0;
+                                switch (current_mode)
+                                {
+                                case ServerMode::EMBEDDING:
+                                    current_status = existing->processed;
+                                    break;
+                                case ServerMode::BALANCED:
+                                    current_status = existing->processed;
+                                    break;
+                                case ServerMode::QUALITY:
+                                    current_status = existing->processed;
+                                    break;
+                                }
 
                                 if (current_status != -2) // Not already marked as skipped
                                 {
-                                    ScannedFilesOps::markProcessedWithEscalation(*database_manager_, file_row.file_path, -1);
+                                    ScannedFilesOps::markProcessedWithEscalation(*database_manager_, file_row.file_path, current_mode, -1);
                                     error_count++;
                                     Poco::Logger::get("MediaProcessor").warning("Failed to submit file for processing: " + file_row.file_path);
                                 }
@@ -853,7 +964,7 @@ namespace MediaDedup
                             else
                             {
                                 // No existing record, mark as failed
-                                ScannedFilesOps::markProcessedWithEscalation(*database_manager_, file_row.file_path, -1);
+                                ScannedFilesOps::markProcessedWithEscalation(*database_manager_, file_row.file_path, current_mode, -1);
                                 error_count++;
                                 Poco::Logger::get("MediaProcessor").warning("Failed to submit file for processing: " + file_row.file_path);
                             }
@@ -861,7 +972,7 @@ namespace MediaDedup
                         catch (...)
                         {
                             // Fallback: mark as failed if we can't check status
-                            ScannedFilesOps::markProcessedWithEscalation(*database_manager_, file_row.file_path, -1);
+                            ScannedFilesOps::markProcessedWithEscalation(*database_manager_, file_row.file_path, current_mode, -1);
                             error_count++;
                             Poco::Logger::get("MediaProcessor").warning("Failed to submit file for processing (fallback): " + file_row.file_path);
                         }
